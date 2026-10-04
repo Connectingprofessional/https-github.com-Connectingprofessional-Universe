@@ -1,3 +1,4 @@
+```javascript
 import express from 'express';
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import WebSocket from 'ws';
@@ -10,11 +11,25 @@ const aisStreamKey = process.env.AISSTREAM_API_KEY || '';
 const taxiUrl = process.env.TAXI_GEOJSON_URL || '';
 const overpassUrl = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
 const cellKey = process.env.OPENCELLID_API_KEY || '';
-const mobilityDatabaseToken = process.env.MOBILITY_DATABASE_API_KEY || '';
+
+const mobilityDatabaseRefreshToken =
+  process.env.MOBILITY_DATABASE_REFRESH_TOKEN || '';
+
+const mobilityDatabaseApiKey =
+  process.env.MOBILITY_DATABASE_API_KEY || '';
+
 const mobilityDatabaseUrl =
   process.env.MOBILITY_DATABASE_API_URL ||
   'https://api.mobilitydatabase.org/v1/gtfs_rt_feeds';
+
+const mobilityDatabaseTokenUrl =
+  process.env.MOBILITY_DATABASE_TOKEN_URL ||
+  'https://api.mobilitydatabase.org/v1/tokens';
+
+let mobilityAccessToken = '';
+let mobilityAccessTokenExpiresAt = 0;
 let mobilityDiscoveryAttempted = false;
+
 let mobilityDiscoveryStatus = 'not-configured';
 let mobilityDiscoveryError = null;
 const flightGlobalCache={at:0,features:null,promise:null};
@@ -25,18 +40,29 @@ function bbox(q){
   if(a.length!==4 || a.some(function(x){return !Number.isFinite(x)})) return null;
   return {minLon:Math.max(-180,Math.min(180,a[0])),minLat:Math.max(-90,Math.min(90,a[1])),maxLon:Math.max(-180,Math.min(180,a[2])),maxLat:Math.max(-90,Math.min(90,a[3]))};
 }
+
 function urlWithBox(url,b){
   return url.replaceAll('{minLon}',String(b.minLon)).replaceAll('{minLat}',String(b.minLat)).replaceAll('{maxLon}',String(b.maxLon)).replaceAll('{maxLat}',String(b.maxLat)).replaceAll('{bbox}',[b.minLon,b.minLat,b.maxLon,b.maxLat].join(','));
 }
-function cached(k,ms){var x=cache.get(k);return x && Date.now()-x.t<ms?x.v:null}
-function put(k,v){cache.set(k,{t:Date.now(),v:v});return v}
+
+function cached(k,ms){
+  var x=cache.get(k);
+  return x && Date.now()-x.t<ms?x.v:null
+}
+
+function put(k,v){
+  cache.set(k,{t:Date.now(),v:v});
+  return v
+}
 
 async function flights(b){
   const key=[b.minLon.toFixed(2),b.minLat.toFixed(2),b.maxLon.toFixed(2),b.maxLat.toFixed(2)].join(',');
   const cacheKey='opensky:'+key;
   const hit=cached(cacheKey,12000);
   if(hit)return hit;
+
   let features=[];
+
   const AIRLINE_MAP = {
     UA: { name: 'United Airlines', iata: 'UA' },
     AA: { name: 'American Airlines', iata: 'AA' },
@@ -51,7 +77,16 @@ async function flights(b){
     AI: { name: 'Air India', iata: 'AI' },
     KL: { name: 'KLM Royal Dutch', iata: 'KL' }
   };
-  const AC_TYPES = ['Boeing 787-9 Dreamliner', 'Airbus A350-900', 'Boeing 777-300ER', 'Airbus A321neo', 'Boeing 737 MAX 9', 'Airbus A330-300'];
+
+  const AC_TYPES = [
+    'Boeing 787-9 Dreamliner',
+    'Airbus A350-900',
+    'Boeing 777-300ER',
+    'Airbus A321neo',
+    'Boeing 737 MAX 9',
+    'Airbus A330-300'
+  ];
+
   const CITY_PAIRS = [
     { orig: 'JFK (New York)', dest: 'LHR (London)' },
     { orig: 'HND (Tokyo)', dest: 'LAX (Los Angeles)' },
@@ -67,53 +102,66 @@ async function flights(b){
     const timeout = setTimeout(()=>controller.abort(), 800);
     const r=await fetch(u,{headers:{'User-Agent':'TrackMeNow/1.0'},signal:controller.signal});
     clearTimeout(timeout);
+
     if(r.ok){
       const j=await r.json(),now=Date.now()/1000;
-      features=(j.states||[]).filter(s=>Number.isFinite(Number(s[5]))&&Number.isFinite(Number(s[6]))).map((s, idx)=>{
-        const cs = (s[1]||'').trim() || (s[0] ? 'FLT' + s[0].slice(-3) : 'FLT100');
-        const code = cs.slice(0, 2).toUpperCase();
-        const al = AIRLINE_MAP[code] || { name: (s[2] || 'Commercial') + ' Airlines', iata: code || 'GL' };
-        const acType = AC_TYPES[idx % AC_TYPES.length];
-        const pair = CITY_PAIRS[idx % CITY_PAIRS.length];
-        const altM = Number.isFinite(Number(s[7])) ? Number(s[7]) : 10200;
-        const spdMps = Number.isFinite(Number(s[9])) ? Number(s[9]) : 240;
-        const vRate = Number.isFinite(Number(s[11])) ? Number(s[11]) : 0;
-        let flightStatus = 'EN ROUTE (CRUISING)';
-        if (s[8]) flightStatus = 'TAXIING / ON GROUND';
-        else if (vRate > 1.5) flightStatus = 'CLIMBING';
-        else if (vRate < -1.5) flightStatus = 'DESCENDING (ON APPROACH)';
 
-        return {
-          type:'Feature',geometry:{type:'Point',coordinates:[Number(s[5]),Number(s[6])]},
-          properties:{
-            category:'flight',source:'OpenSky ADS-B Live',status:Number(s[4])&&now-Number(s[4])<45?'LIVE':'RECENT',
-            airline: al.name,
-            flight_number: cs,
-            callsign: cs,
-            aircraft_type: acType,
-            registration: 'N' + (10000 + (idx * 37) % 89999),
-            origin: pair.orig,
-            destination: pair.dest,
-            route: `${pair.orig} → ${pair.dest}`,
-            current_location: `${Number(s[6]).toFixed(3)}°N, ${Number(s[5]).toFixed(3)}°E`,
-            altitude_m: altM,
-            altitude_ft: Math.round(altM * 3.28084),
-            speed_mps: spdMps,
-            speed_kts: Math.round(spdMps * 1.94384),
-            heading: Number.isFinite(Number(s[10])) ? Number(s[10]) : 0,
-            flight_status: flightStatus,
-            estimated_arrival: 'T+' + (45 + (idx * 15) % 180) + ' min',
-            last_contact: s[4] || now,
-            last_update: '3s ago'
-          }
-        };
-      });
+      features=(j.states||[])
+        .filter(s=>Number.isFinite(Number(s[5]))&&Number.isFinite(Number(s[6])))
+        .map((s, idx)=>{
+          const cs = (s[1]||'').trim() || (s[0] ? 'FLT' + s[0].slice(-3) : 'FLT100');
+          const code = cs.slice(0, 2).toUpperCase();
+          const al = AIRLINE_MAP[code] || { name: (s[2] || 'Commercial') + ' Airlines', iata: code || 'GL' };
+          const acType = AC_TYPES[idx % AC_TYPES.length];
+          const pair = CITY_PAIRS[idx % CITY_PAIRS.length];
+          const altM = Number.isFinite(Number(s[7])) ? Number(s[7]) : 10200;
+          const spdMps = Number.isFinite(Number(s[9])) ? Number(s[9]) : 240;
+          const vRate = Number.isFinite(Number(s[11])) ? Number(s[11]) : 0;
+
+          let flightStatus = 'EN ROUTE (CRUISING)';
+          if (s[8]) flightStatus = 'TAXIING / ON GROUND';
+          else if (vRate > 1.5) flightStatus = 'CLIMBING';
+          else if (vRate < -1.5) flightStatus = 'DESCENDING (ON APPROACH)';
+
+          return {
+            type:'Feature',
+            geometry:{
+              type:'Point',
+              coordinates:[Number(s[5]),Number(s[6])]
+            },
+            properties:{
+              category:'flight',
+              source:'OpenSky ADS-B Live',
+              status:Number(s[4])&&now-Number(s[4])<45?'LIVE':'RECENT',
+              airline: al.name,
+              flight_number: cs,
+              callsign: cs,
+              aircraft_type: acType,
+              registration: 'N' + (10000 + (idx * 37) % 89999),
+              origin: pair.orig,
+              destination: pair.dest,
+              route: `${pair.orig} → ${pair.dest}`,
+              current_location: `${Number(s[6]).toFixed(3)}°N, ${Number(s[5]).toFixed(3)}°E`,
+              altitude_m: altM,
+              altitude_ft: Math.round(altM * 3.28084),
+              speed_mps: spdMps,
+              speed_kts: Math.round(spdMps * 1.94384),
+              heading: Number.isFinite(Number(s[10])) ? Number(s[10]) : 0,
+              flight_status: flightStatus,
+              estimated_arrival: 'T+' + (45 + (idx * 15) % 180) + ' min',
+              last_contact: s[4] || now,
+              last_update: '3s ago'
+            }
+          };
+        });
     }
   }catch(e){}
+
   if(!features.length){
     const alKeys = Object.keys(AIRLINE_MAP);
     const count=Math.min(24,Math.max(5,Math.floor(Math.abs(b.maxLon-b.minLon)*1.8)));
     const now=Math.floor(Date.now()/1000);
+
     for(let i=0;i<count;i++){
       const lat=b.minLat+(b.maxLat-b.minLat)*(0.1+0.8*((i*37+13)%100)/100);
       const lon=b.minLon+(b.maxLon-b.minLon)*(0.1+0.8*((i*59+29)%100)/100);
@@ -125,11 +173,17 @@ async function flights(b){
       const heading=(i*67)%360;
       const spd=215+((i*13)%65);
       const alt=7800+((i*750)%4400);
+
       features.push({
         type:'Feature',
-        geometry:{type:'Point',coordinates:[Number(lon.toFixed(4)),Number(lat.toFixed(4))]},
+        geometry:{
+          type:'Point',
+          coordinates:[Number(lon.toFixed(4)),Number(lat.toFixed(4))]
+        },
         properties:{
-          category:'flight',source:'ADS-B Live Corridor',status:'LIVE',
+          category:'flight',
+          source:'ADS-B Live Corridor',
+          status:'LIVE',
           airline: al.name,
           flight_number: fltNum,
           callsign: fltNum,
@@ -152,29 +206,85 @@ async function flights(b){
       });
     }
   }
+
   return put(cacheKey,features);
 }
+
 function transitMode(v){
   var x=((v.vehicle&&v.vehicle.label)||'')+' '+((v.vehicle&&v.vehicle.id)||'')+' '+((v.trip&&v.trip.routeId)||'');
   x=x.toLowerCase();
+
   if(/taxi|cab|uber|lyft|ola/.test(x)) return 'taxi';
   if(/metro|subway|underground/.test(x)) return 'metro';
   if(/tram|streetcar|light.?rail/.test(x)) return 'tram';
   if(/train|rail|express/.test(x)) return 'train';
   if(/ferry|boat|water/.test(x)) return 'ferry';
+
   return 'bus';
 }
+
 async function discoverMobilityDatabase(){
   if(mobilityDiscoveryAttempted)return;
 
   mobilityDiscoveryAttempted=true;
 
-  if(!mobilityDatabaseToken){
+  if(!mobilityDatabaseRefreshToken && !mobilityDatabaseApiKey){
     mobilityDiscoveryStatus='api-key-required';
     return;
   }
 
   try{
+    let accessToken = mobilityDatabaseApiKey;
+
+    if(mobilityDatabaseRefreshToken){
+      if(!mobilityAccessToken || Date.now() >= mobilityAccessTokenExpiresAt){
+
+        const tokenResponse = await fetch(
+          mobilityDatabaseTokenUrl,
+          {
+            method:'POST',
+            headers:{
+              'Accept':'application/json',
+              'Content-Type':'application/json',
+              'User-Agent':'Universe/1.0'
+            },
+            body:JSON.stringify({
+              refresh_token:mobilityDatabaseRefreshToken
+            })
+          }
+        );
+
+        if(!tokenResponse.ok){
+          throw Error(
+            'Mobility Database token HTTP '+
+            tokenResponse.status
+          );
+        }
+
+        const tokenBody = await tokenResponse.json();
+
+        mobilityAccessToken =
+          tokenBody.access_token ||
+          tokenBody.token ||
+          '';
+
+        if(!mobilityAccessToken){
+          throw Error(
+            'Mobility Database token response did not contain an access token'
+          );
+        }
+
+        const expiresIn =
+          Number(tokenBody.expires_in || 3600);
+
+        mobilityAccessTokenExpiresAt =
+          Date.now() +
+          Math.max(60,expiresIn-60)*1000;
+      }
+
+      accessToken = mobilityAccessToken;
+    }
+
     const controller=new AbortController();
     const timeout=setTimeout(()=>controller.abort(),10000);
 
@@ -184,7 +294,7 @@ async function discoverMobilityDatabase(){
         method:'GET',
         headers:{
           'Accept':'application/json',
-          'Authorization':'Bearer '+mobilityDatabaseToken,
+          'Authorization':'Bearer '+accessToken,
           'User-Agent':'Universe/1.0'
         },
         signal:controller.signal
@@ -229,10 +339,6 @@ async function discoverMobilityDatabase(){
         added++;
       }
 
-      /*
-       * Prevent the server from polling the entire
-       * Mobility Database catalog.
-       */
       if(gtfsUrls.length>=50)break;
     }
 
@@ -252,60 +358,195 @@ async function discoverMobilityDatabase(){
     mobilityDiscoveryError=e&&e.message||String(e);
   }
 }
+
 async function discoverTransitous(){
   if(discoveredGtfs)return;
+
   discoveredGtfs=true;
+
   if(!transitousCountries.length||transitousCountries.includes('off'))return;
+
   const sampleCountries=['us','gb','de','fr','in','jp','au'].slice(0,3);
+
   await Promise.allSettled(sampleCountries.map(async c=>{
     try{
       const controller = new AbortController();
       const t = setTimeout(()=>controller.abort(),1500);
-      const rr=await fetch('https://raw.githubusercontent.com/public-transport/transitous/main/feeds/'+c+'.json',{headers:{'User-Agent':'TrackMeNow/1.0'},signal:controller.signal});
+
+      const rr=await fetch(
+        'https://raw.githubusercontent.com/public-transport/transitous/main/feeds/'+c+'.json',
+        {
+          headers:{'User-Agent':'TrackMeNow/1.0'},
+          signal:controller.signal
+        }
+      );
+
       clearTimeout(t);
+
       if(!rr.ok)return;
+
       const manifest=await rr.json();
-      for(const src of (manifest.sources||[]))if(src.spec==='gtfs-rt'&&src.url&&!gtfsUrls.includes(src.url))gtfsUrls.push(src.url);
+
+      for(const src of (manifest.sources||[]))
+        if(src.spec==='gtfs-rt'&&src.url&&!gtfsUrls.includes(src.url))
+          gtfsUrls.push(src.url);
+
     }catch(e){}
   }));
 }
+
 async function transit(b){
   Promise.allSettled([
     discoverMobilityDatabase(),
     discoverTransitous()
   ]).catch(()=>{});
+
   var out=[],nowMs=Date.now();
+
   for(var i=0;i<Math.min(gtfsUrls.length,3);i++){
     var u=gtfsUrls[i],c=gtfsCache.get(u);
-    if(c&&nowMs-c.fetchedAt<gtfsIntervalMs){out.push.apply(out,c.features);continue}
+
+    if(c&&nowMs-c.fetchedAt<gtfsIntervalMs){
+      out.push.apply(out,c.features);
+      continue;
+    }
+
     try{
       const controller=new AbortController();
       const t=setTimeout(()=>controller.abort(),500);
-      var r=await fetch(u,{headers:{'User-Agent':'TrackMeNow/1.0','Accept':'application/x-protobuf,application/octet-stream'},signal:controller.signal});
+
+      var r=await fetch(
+        u,
+        {
+          headers:{
+            'User-Agent':'TrackMeNow/1.0',
+            'Accept':'application/x-protobuf,application/octet-stream'
+          },
+          signal:controller.signal
+        }
+      );
+
       clearTimeout(t);
+
       if(!r.ok)throw Error('HTTP '+r.status);
-      var feed=GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(await r.arrayBuffer()));
+
+      var feed=GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(
+        new Uint8Array(await r.arrayBuffer())
+      );
+
       var now=Math.floor(Date.now()/1000),features=[];
+
       for(var e of(feed.entity||[])){
-        var v=e.vehicle,p=v&&v.position;if(!p||!Number.isFinite(p.latitude)||!Number.isFinite(p.longitude))continue;
-        var ts=Number(v.timestamp||feed.header&&feed.header.timestamp||0);if(ts&&now-ts>180)continue;
+        var v=e.vehicle,p=v&&v.position;
+
+        if(!p||!Number.isFinite(p.latitude)||!Number.isFinite(p.longitude))
+          continue;
+
+        var ts=Number(v.timestamp||feed.header&&feed.header.timestamp||0);
+
+        if(ts&&now-ts>180)continue;
+
         var mode=transitMode(v);
-        features.push({type:'Feature',geometry:{type:'Point',coordinates:[p.longitude,p.latitude]},properties:{category:'public-transport',mode:mode,source:'GTFS-Realtime',status:'LIVE',feed:u,vehicle_id:v.vehicle&&v.vehicle.id||e.id,label:v.vehicle&&v.vehicle.label||'',trip_id:v.trip&&v.trip.tripId||'',route_id:v.trip&&v.trip.routeId||'',headsign:v.trip&&v.trip.tripHeadsign||'',speed_mps:p.speed,speed_kmh:Number.isFinite(p.speed)?Number((p.speed*3.6).toFixed(0)):28,bearing:p.bearing,timestamp:ts||now}});
+
+        features.push({
+          type:'Feature',
+          geometry:{
+            type:'Point',
+            coordinates:[p.longitude,p.latitude]
+          },
+          properties:{
+            category:'public-transport',
+            mode:mode,
+            source:'GTFS-Realtime',
+            status:'LIVE',
+            feed:u,
+            vehicle_id:v.vehicle&&v.vehicle.id||e.id,
+            label:v.vehicle&&v.vehicle.label||'',
+            trip_id:v.trip&&v.trip.tripId||'',
+            route_id:v.trip&&v.trip.routeId||'',
+            headsign:v.trip&&v.trip.tripHeadsign||'',
+            speed_mps:p.speed,
+            speed_kmh:Number.isFinite(p.speed)?Number((p.speed*3.6).toFixed(0)):28,
+            bearing:p.bearing,
+            timestamp:ts||now
+          }
+        });
       }
-      gtfsCache.set(u,{fetchedAt:nowMs,features:features,status:'live',error:null});out.push.apply(out,features);
-    }catch(err){gtfsCache.set(u,{fetchedAt:nowMs,features:[],status:'error',error:err.message})}
+
+      gtfsCache.set(
+        u,
+        {
+          fetchedAt:nowMs,
+          features:features,
+          status:'live',
+          error:null
+        }
+      );
+
+      out.push.apply(out,features);
+
+    }catch(err){
+      gtfsCache.set(
+        u,
+        {
+          fetchedAt:nowMs,
+          features:[],
+          status:'error',
+          error:err.message
+        }
+      );
+    }
   }
-  if(b&&(!out.length || (b.minLon!=null && !out.some(f=>f.geometry.coordinates[0]>=b.minLon&&f.geometry.coordinates[0]<=b.maxLon&&f.geometry.coordinates[1]>=b.minLat&&f.geometry.coordinates[1]<=b.maxLat)))){
+
+  if(b&&(!out.length || (
+    b.minLon!=null &&
+    !out.some(
+      f=>f.geometry.coordinates[0]>=b.minLon&&
+      f.geometry.coordinates[0]<=b.maxLon&&
+      f.geometry.coordinates[1]>=b.minLat&&
+      f.geometry.coordinates[1]<=b.maxLat
+    )
+  ))){
     const key='transit-sim:'+[b.minLon.toFixed(2),b.minLat.toFixed(2),b.maxLon.toFixed(2),b.maxLat.toFixed(2)].join(',');
     const cachedSim=cached(key,25000);
+
     if(cachedSim)return cachedSim;
+
     const modes=['bus','bus','train','tram','metro','bus'];
-    const lines=['Metro Express 12','Amtrak Regional #84','Intercity Rail 104','CityBus Line 42','Subway Line 1','Crosstown 88','Rapid Transit Red'];
-    const operators=['National Rail Network','Metropolitan Transit Authority','City Express Bus','Intercity Rail'];
-    const stations=['Central Terminal','St. Pancras International','Union Station','North Gateway','Airport Interchange','South Harbor'];
-    const count=Math.min(22,Math.max(6,Math.floor(Math.abs(b.maxLon-b.minLon)*2.5)));
+    const lines=[
+      'Metro Express 12',
+      'Amtrak Regional #84',
+      'Intercity Rail 104',
+      'CityBus Line 42',
+      'Subway Line 1',
+      'Crosstown 88',
+      'Rapid Transit Red'
+    ];
+
+    const operators=[
+      'National Rail Network',
+      'Metropolitan Transit Authority',
+      'City Express Bus',
+      'Intercity Rail'
+    ];
+
+    const stations=[
+      'Central Terminal',
+      'St. Pancras International',
+      'Union Station',
+      'North Gateway',
+      'Airport Interchange',
+      'South Harbor'
+    ];
+
+    const count=Math.min(
+      22,
+      Math.max(6,Math.floor(Math.abs(b.maxLon-b.minLon)*2.5))
+    );
+
     const now=Math.floor(Date.now()/1000);
     const sim=[];
+
     for(let i=0;i<count;i++){
       const lat=b.minLat+(b.maxLat-b.minLat)*(0.15+0.7*((i*43+23)%100)/100);
       const lon=b.minLon+(b.maxLon-b.minLon)*(0.15+0.7*((i*53+31)%100)/100);
@@ -315,9 +556,16 @@ async function transit(b){
       const st1=stations[i%stations.length];
       const st2=stations[(i+1)%stations.length];
       const spd=mode==='train'?75+((i*8)%45):14+((i*3)%18);
+
       sim.push({
         type:'Feature',
-        geometry:{type:'Point',coordinates:[Number(lon.toFixed(4)),Number(lat.toFixed(4))]},
+        geometry:{
+          type:'Point',
+          coordinates:[
+            Number(lon.toFixed(4)),
+            Number(lat.toFixed(4))
+          ]
+        },
         properties:{
           category:'public-transport',
           mode:mode,
@@ -347,60 +595,215 @@ async function transit(b){
         }
       });
     }
+
     return put(key,sim);
   }
+
   return out;
 }
+
 async function geo(url,b,source){
-  var r=await fetch(urlWithBox(url,b),{headers:{'User-Agent':'TrackMeNow/1.0'}});
+  var r=await fetch(
+    urlWithBox(url,b),
+    {headers:{'User-Agent':'TrackMeNow/1.0'}}
+  );
+
   if(!r.ok) throw Error(source+' HTTP '+r.status);
+
   var j=await r.json();
-  return (j.features||[]).map(function(f){return Object.assign({},f,{properties:Object.assign({},f.properties||{},{source:(f.properties&&f.properties.source)||source})})});
+
+  return (j.features||[]).map(function(f){
+    return Object.assign(
+      {},
+      f,
+      {
+        properties:Object.assign(
+          {},
+          f.properties||{},
+          {
+            source:(f.properties&&f.properties.source)||source
+          }
+        )
+      }
+    )
+  });
 }
+
 function ensureShipStream(b){
   if(!aisStreamKey)return;
-  const key=[b.minLat.toFixed(2),b.minLon.toFixed(2),b.maxLat.toFixed(2),b.maxLon.toFixed(2)].join(',');
-  if(shipStream.socket&&shipStream.connected&&shipStream.bboxKey===key)return;
-  if(shipStream.socket){try{shipStream.socket.close()}catch(e){}}
-  shipStream.bboxKey=key;shipStream.connected=false;
-  const ws=new WebSocket('wss://stream.aisstream.io/v0/stream',{perMessageDeflate:true});
+
+  const key=[
+    b.minLat.toFixed(2),
+    b.minLon.toFixed(2),
+    b.maxLat.toFixed(2),
+    b.maxLon.toFixed(2)
+  ].join(',');
+
+  if(
+    shipStream.socket&&
+    shipStream.connected&&
+    shipStream.bboxKey===key
+  )return;
+
+  if(shipStream.socket){
+    try{shipStream.socket.close()}catch(e){}
+  }
+
+  shipStream.bboxKey=key;
+  shipStream.connected=false;
+
+  const ws=new WebSocket(
+    'wss://stream.aisstream.io/v0/stream',
+    {perMessageDeflate:true}
+  );
+
   shipStream.socket=ws;
+
   ws.on('open',function(){
-    shipStream.connected=true;shipStream.retryMs=1000;
-    ws.send(JSON.stringify({APIKey:aisStreamKey,BoundingBoxes:[[[b.minLat,b.minLon],[b.maxLat,b.maxLon]]],FilterMessageTypes:['PositionReport']}));
+    shipStream.connected=true;
+    shipStream.retryMs=1000;
+
+    ws.send(
+      JSON.stringify({
+        APIKey:aisStreamKey,
+        BoundingBoxes:[
+          [[b.minLat,b.minLon],[b.maxLat,b.maxLon]]
+        ],
+        FilterMessageTypes:['PositionReport']
+      })
+    );
   });
+
   ws.on('message',function(raw){
     try{
-      const e=JSON.parse(Buffer.from(raw).toString('utf8')); if(e.MessageType!=='PositionReport')return;
-      const m=e.Message&&e.Message.PositionReport||{},md=e.MetaData||{};
-      const lat=Number(m.Latitude!=null?m.Latitude:md.Latitude),lon=Number(m.Longitude!=null?m.Longitude:md.Longitude),mmsi=String(m.UserID!=null?m.UserID:(md.MMSI||''));
-      if(!mmsi||!Number.isFinite(lat)||!Number.isFinite(lon))return;
-      shipStream.positions.set(mmsi,{lat,lon,mmsi,name:md.ShipName||'',sog:Number(m.Sog),cog:Number(m.Cog),timestamp:Number(m.Timestamp)||Math.floor(Date.now()/1000),seenAt:Date.now()});
+      const e=JSON.parse(
+        Buffer.from(raw).toString('utf8')
+      );
+
+      if(e.MessageType!=='PositionReport')return;
+
+      const m=e.Message&&e.Message.PositionReport||{};
+      const md=e.MetaData||{};
+
+      const lat=Number(
+        m.Latitude!=null?m.Latitude:md.Latitude
+      );
+
+      const lon=Number(
+        m.Longitude!=null?m.Longitude:md.Longitude
+      );
+
+      const mmsi=String(
+        m.UserID!=null?m.UserID:(md.MMSI||'')
+      );
+
+      if(
+        !mmsi||
+        !Number.isFinite(lat)||
+        !Number.isFinite(lon)
+      )return;
+
+      shipStream.positions.set(
+        mmsi,
+        {
+          lat,
+          lon,
+          mmsi,
+          name:md.ShipName||'',
+          sog:Number(m.Sog),
+          cog:Number(m.Cog),
+          timestamp:Number(m.Timestamp)||Math.floor(Date.now()/1000),
+          seenAt:Date.now()
+        }
+      );
+
     }catch(e){}
   });
+
   ws.on('close',function(){
     shipStream.connected=false;
+
     if(shipStream.socket!==ws)return;
-    const wait=shipStream.retryMs;shipStream.retryMs=Math.min(15000,shipStream.retryMs*2);
-    setTimeout(function(){if(aisStreamKey&&shipStream.bboxKey===key){shipStream.socket=null;ensureShipStream(b)}},wait);
+
+    const wait=shipStream.retryMs;
+    shipStream.retryMs=Math.min(
+      15000,
+      shipStream.retryMs*2
+    );
+
+    setTimeout(function(){
+      if(
+        aisStreamKey&&
+        shipStream.bboxKey===key
+      ){
+        shipStream.socket=null;
+        ensureShipStream(b)
+      }
+    },wait);
   });
+
   ws.on('error',function(){});
 }
+
 async function ships(b){
-  if(aisUrl)return (await geo(aisUrl,b,'AIS')).map(function(f){f.properties.category='ship';return f});
+  if(aisUrl)
+    return (await geo(aisUrl,b,'AIS')).map(function(f){
+      f.properties.category='ship';
+      return f
+    });
+
   const liveShips=[];
+
   if(aisStreamKey){
     ensureShipStream(b);
+
     const now=Date.now();
+
     for(const p of shipStream.positions.values()){
-      if(now-p.seenAt>180000||p.lon<b.minLon||p.lon>b.maxLon||p.lat<b.minLat||p.lat>b.maxLat)continue;
-      liveShips.push({type:'Feature',geometry:{type:'Point',coordinates:[p.lon,p.lat]},properties:{category:'ship',source:'AIS Stream',status:now-p.seenAt<90000?'LIVE':'RECENT',mmsi:p.mmsi,name:p.name||'VESSEL-'+p.mmsi.slice(-4),ship_type:'Cargo / Commercial',speed_mps:Number.isFinite(p.sog)?Number((p.sog*0.514444).toFixed(1)):null,speed_knots:Number.isFinite(p.sog)?Number(p.sog.toFixed(1)):null,heading:Number.isFinite(p.cog)?p.cog:null,timestamp:p.timestamp}});
+      if(
+        now-p.seenAt>180000||
+        p.lon<b.minLon||
+        p.lon>b.maxLon||
+        p.lat<b.minLat||
+        p.lat>b.maxLat
+      )continue;
+
+      liveShips.push({
+        type:'Feature',
+        geometry:{
+          type:'Point',
+          coordinates:[p.lon,p.lat]
+        },
+        properties:{
+          category:'ship',
+          source:'AIS Stream',
+          status:now-p.seenAt<90000?'LIVE':'RECENT',
+          mmsi:p.mmsi,
+          name:p.name||'VESSEL-'+p.mmsi.slice(-4),
+          ship_type:'Cargo / Commercial',
+          speed_mps:Number.isFinite(p.sog)?Number((p.sog*0.514444).toFixed(1)):null,
+          speed_knots:Number.isFinite(p.sog)?Number(p.sog.toFixed(1)):null,
+          heading:Number.isFinite(p.cog)?p.cog:null,
+          timestamp:p.timestamp
+        }
+      });
     }
   }
-  if(liveShips.length) return liveShips;
-  const key='ships-sim:'+[b.minLon.toFixed(2),b.minLat.toFixed(2),b.maxLon.toFixed(2),b.maxLat.toFixed(2)].join(',');
+
+  if(liveShips.length)return liveShips;
+
+  const key='ships-sim:'+
+    [
+      b.minLon.toFixed(2),
+      b.minLat.toFixed(2),
+      b.maxLon.toFixed(2),
+      b.maxLat.toFixed(2)
+    ].join(',');
+
   const hit=cached(key,25000);
-  if(hit) return hit;
+
+  if(hit)return hit;
+
   const vessels=[
     {name:'EVER GIVEN',type:'Container Ship',flag:'Panama',len:400},
     {name:'MAERSK MC-KINNEY',type:'Container Carrier',flag:'Denmark',len:399},
@@ -413,9 +816,18 @@ async function ships(b){
     {name:'OCEAN SENTINEL',type:'Patrol / Escort',flag:'United States',len:65},
     {name:'ISLAND EXPLORER',type:'Passenger Ferry',flag:'Norway',len:142}
   ];
-  const count=Math.min(18,Math.max(5,Math.floor(Math.abs(b.maxLon-b.minLon)*2.2)));
+
+  const count=Math.min(
+    18,
+    Math.max(
+      5,
+      Math.floor(Math.abs(b.maxLon-b.minLon)*2.2)
+    )
+  );
+
   const now=Math.floor(Date.now()/1000);
   const out=[];
+
   for(let i=0;i<count;i++){
     const v=vessels[i%vessels.length];
     const lat=b.minLat+(b.maxLat-b.minLat)*(0.15+0.7*((i*47+19)%100)/100);
@@ -423,62 +835,169 @@ async function ships(b){
     const sog=9.5+((i*2.2)%12);
     const cog=(i*57+30)%360;
     const mmsi=String(211000000+((i*481729)%700000000));
+
     out.push({
       type:'Feature',
-      geometry:{type:'Point',coordinates:[Number(lon.toFixed(4)),Number(lat.toFixed(4))]},
+      geometry:{
+        type:'Point',
+        coordinates:[
+          Number(lon.toFixed(4)),
+          Number(lat.toFixed(4))
+        ]
+      },
       properties:{
-        category:'ship',source:'AIS Maritime Network',status:'LIVE',
-        mmsi,name:v.name,ship_type:v.type,flag:v.flag,length_m:v.len,
-        speed_mps:Number((sog*0.514444).toFixed(1)),speed_knots:Number(sog.toFixed(1)),
-        heading:cog,timestamp:now
+        category:'ship',
+        source:'AIS Maritime Network',
+        status:'LIVE',
+        mmsi,
+        name:v.name,
+        ship_type:v.type,
+        flag:v.flag,
+        length_m:v.len,
+        speed_mps:Number((sog*0.514444).toFixed(1)),
+        speed_knots:Number(sog.toFixed(1)),
+        heading:cog,
+        timestamp:now
       }
     });
   }
+
   return put(key,out);
 }
+
 async function traffic(b){
   if(process.env.TRAFFIC_GEOJSON_URL){
     try{
-      return (await geo(process.env.TRAFFIC_GEOJSON_URL,b,'Traffic Feed')).map(function(f){f.properties=f.properties||{};f.properties.category='traffic';return f;});
+      return (await geo(
+        process.env.TRAFFIC_GEOJSON_URL,
+        b,
+        'Traffic Feed'
+      )).map(function(f){
+        f.properties=f.properties||{};
+        f.properties.category='traffic';
+        return f;
+      });
     }catch(e){}
   }
-  const key='traffic-sim:'+[b.minLon.toFixed(2),b.minLat.toFixed(2),b.maxLon.toFixed(2),b.maxLat.toFixed(2)].join(',');
+
+  const key='traffic-sim:'+
+    [
+      b.minLon.toFixed(2),
+      b.minLat.toFixed(2),
+      b.maxLon.toFixed(2),
+      b.maxLat.toFixed(2)
+    ].join(',');
+
   const hit=cached(key,25000);
-  if(hit) return hit;
+
+  if(hit)return hit;
+
   const templates=[
-    {title:'Heavy Congestion / Bottleneck',severity:'heavy',delay_min:22,speed_kmh:15,desc:'Crawling traffic flow due to peak volume'},
-    {title:'Moderate Highway Slowdown',severity:'moderate',delay_min:11,speed_kmh:38,desc:'Stop-and-go conditions approaching junction'},
-    {title:'Scheduled Road Maintenance',severity:'roadwork',delay_min:7,speed_kmh:45,desc:'Right lane closed for surface resurfacing'},
-    {title:'Disabled Vehicle Incident',severity:'incident',delay_min:15,speed_kmh:24,desc:'Vehicle stopped on inner lane, recovery underway'},
-    {title:'Arterial Flow Sensor',severity:'moderate',delay_min:8,speed_kmh:40,desc:'Speeds 25% below normal free-flow baseline'}
+    {
+      title:'Heavy Congestion / Bottleneck',
+      severity:'heavy',
+      delay_min:22,
+      speed_kmh:15,
+      desc:'Crawling traffic flow due to peak volume'
+    },
+    {
+      title:'Moderate Highway Slowdown',
+      severity:'moderate',
+      delay_min:11,
+      speed_kmh:38,
+      desc:'Stop-and-go conditions approaching junction'
+    },
+    {
+      title:'Scheduled Road Maintenance',
+      severity:'roadwork',
+      delay_min:7,
+      speed_kmh:45,
+      desc:'Right lane closed for surface resurfacing'
+    },
+    {
+      title:'Disabled Vehicle Incident',
+      severity:'incident',
+      delay_min:15,
+      speed_kmh:24,
+      desc:'Vehicle stopped on inner lane, recovery underway'
+    },
+    {
+      title:'Arterial Flow Sensor',
+      severity:'moderate',
+      delay_min:8,
+      speed_kmh:40,
+      desc:'Speeds 25% below normal free-flow baseline'
+    }
   ];
-  const count=Math.min(16,Math.max(4,Math.floor(Math.abs(b.maxLon-b.minLon)*2.0)));
+
+  const count=Math.min(
+    16,
+    Math.max(
+      4,
+      Math.floor(Math.abs(b.maxLon-b.minLon)*2.0)
+    )
+  );
+
   const now=Math.floor(Date.now()/1000);
   const out=[];
+
   for(let i=0;i<count;i++){
     const t=templates[i%templates.length];
     const lat=b.minLat+(b.maxLat-b.minLat)*(0.15+0.7*((i*39+17)%100)/100);
     const lon=b.minLon+(b.maxLon-b.minLon)*(0.15+0.7*((i*51+23)%100)/100);
+
     out.push({
       type:'Feature',
-      geometry:{type:'Point',coordinates:[Number(lon.toFixed(4)),Number(lat.toFixed(4))]},
+      geometry:{
+        type:'Point',
+        coordinates:[
+          Number(lon.toFixed(4)),
+          Number(lat.toFixed(4))
+        ]
+      },
       properties:{
-        category:'traffic',source:'DOT Traffic Monitoring',status:'LIVE',
-        title:t.title,severity:t.severity,delay_min:t.delay_min,
-        speed_kmh:t.speed_kmh,description:t.desc,
-        road_name:`Corridor Express #${i+1}`,timestamp:now
+        category:'traffic',
+        source:'DOT Traffic Monitoring',
+        status:'LIVE',
+        title:t.title,
+        severity:t.severity,
+        delay_min:t.delay_min,
+        speed_kmh:t.speed_kmh,
+        description:t.desc,
+        road_name:`Corridor Express #${i+1}`,
+        timestamp:now
       }
     });
   }
+
   return put(key,out);
 }
+
 async function taxis(b){
   if(!taxiUrl)return [];
-  return (await geo(taxiUrl,b,'Taxi live feed')).map(function(f){f.properties.category='public-transport';f.properties.mode='taxi';f.properties.status=f.properties.status||'LIVE';return f});
+
+  return (await geo(
+    taxiUrl,
+    b,
+    'Taxi live feed'
+  )).map(function(f){
+    f.properties.category='public-transport';
+    f.properties.mode='taxi';
+    f.properties.status=f.properties.status||'LIVE';
+    return f
+  });
 }
+
 async function osmAssets(b){
-  var k='osm:'+b.minLon.toFixed(3)+','+b.minLat.toFixed(3)+','+b.maxLon.toFixed(3)+','+b.maxLat.toFixed(3);
-  var c=cached(k,120000);if(c)return c;
+  var k='osm:'+
+    b.minLon.toFixed(3)+','+
+    b.minLat.toFixed(3)+','+
+    b.maxLon.toFixed(3)+','+
+    b.maxLat.toFixed(3);
+
+  var c=cached(k,120000);
+  if(c)return c;
+
   var q='[out:json][timeout:25];('+
     'nwr["man_made"="surveillance"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     'nwr["contact:webcam"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
@@ -489,26 +1008,78 @@ async function osmAssets(b){
     'nwr["man_made"="mast"]["tower:type"="communication"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     'nwr["man_made"="tower"]["tower:type"="communication"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     ');out center tags;';
-  var r=await fetch(overpassUrl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','User-Agent':'TrackMeNow/1.0'},body:'data='+encodeURIComponent(q)});
-  if(!r.ok) throw Error('Overpass HTTP '+r.status);
+
+  var r=await fetch(
+    overpassUrl,
+    {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded',
+        'User-Agent':'TrackMeNow/1.0'
+      },
+      body:'data='+encodeURIComponent(q)
+    }
+  );
+
+  if(!r.ok)throw Error('Overpass HTTP '+r.status);
+
   var j=await r.json();
+
   var out=(j.elements||[]).map(function(e){
-    var t=e.tags||{},lon=e.lon!=null?e.lon:e.center&&e.center.lon,lat=e.lat!=null?e.lat:e.center&&e.center.lat;
+    var t=e.tags||{},
+        lon=e.lon!=null?e.lon:e.center&&e.center.lon,
+        lat=e.lat!=null?e.lat:e.center&&e.center.lat;
+
     var cat='infrastructure';
-    if(t.man_made==='surveillance'||t['contact:webcam'])cat='camera';
-    else if(t.highway==='bus_stop'||t.amenity==='bus_station')cat='bus-stop';
-    else if(t.amenity==='taxi')cat='taxi-stand';
-    else if(t.amenity==='ferry_terminal')cat='ferry-terminal';
-    else if(t.railway)cat='rail-infrastructure';
-    else if(t.aeroway)cat='airport';
-    else if(t['tower:type']==='communication')cat='cell-tower';
-    return {type:'Feature',geometry:{type:'Point',coordinates:[lon,lat]},properties:{category:cat,source:'OpenStreetMap',osm_id:e.id,name:t.name||t.ref||cat,operator:t.operator||'',live_url:t['contact:webcam']||t.webcam||''}};
-  }).filter(function(f){return Number.isFinite(f.geometry.coordinates[0])&&Number.isFinite(f.geometry.coordinates[1])});
+
+    if(t.man_made==='surveillance'||t['contact:webcam'])
+      cat='camera';
+    else if(t.highway==='bus_stop'||t.amenity==='bus_station')
+      cat='bus-stop';
+    else if(t.amenity==='taxi')
+      cat='taxi-stand';
+    else if(t.amenity==='ferry_terminal')
+      cat='ferry-terminal';
+    else if(t.railway)
+      cat='rail-infrastructure';
+    else if(t.aeroway)
+      cat='airport';
+    else if(t['tower:type']==='communication')
+      cat='cell-tower';
+
+    return {
+      type:'Feature',
+      geometry:{
+        type:'Point',
+        coordinates:[lon,lat]
+      },
+      properties:{
+        category:cat,
+        source:'OpenStreetMap',
+        osm_id:e.id,
+        name:t.name||t.ref||cat,
+        operator:t.operator||'',
+        live_url:t['contact:webcam']||t.webcam||''
+      }
+    };
+  }).filter(function(f){
+    return Number.isFinite(f.geometry.coordinates[0])&&
+      Number.isFinite(f.geometry.coordinates[1])
+  });
+
   return put(k,out);
 }
+
 async function intelligenceAssets(b){
-  var k='intel:'+b.minLon.toFixed(3)+','+b.minLat.toFixed(3)+','+b.maxLon.toFixed(3)+','+b.maxLat.toFixed(3);
-  var c=cached(k,300000);if(c)return c;
+  var k='intel:'+
+    b.minLon.toFixed(3)+','+
+    b.minLat.toFixed(3)+','+
+    b.maxLon.toFixed(3)+','+
+    b.maxLat.toFixed(3);
+
+  var c=cached(k,300000);
+  if(c)return c;
+
   var q='[out:json][timeout:35];('+
     'nwr["power"="plant"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     'nwr["power"="generator"]['+'generator:source'+']('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
@@ -534,132 +1105,758 @@ async function intelligenceAssets(b){
     'nwr["amenity"="embassy"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     'nwr["military"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     ');out center tags;';
-  var r=await fetch(overpassUrl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','User-Agent':'TrackMeNow/1.0'},body:'data='+encodeURIComponent(q)});
-  if(!r.ok) throw Error('Overpass intelligence HTTP '+r.status);
+
+  var r=await fetch(
+    overpassUrl,
+    {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded',
+        'User-Agent':'TrackMeNow/1.0'
+      },
+      body:'data='+encodeURIComponent(q)
+    }
+  );
+
+  if(!r.ok)throw Error('Overpass intelligence HTTP '+r.status);
+
   var j=await r.json(),out=[];
+
   for(var e of(j.elements||[])){
-    var t=e.tags||{},lon=e.lon!=null?e.lon:e.center&&e.center.lon,lat=e.lat!=null?e.lat:e.center&&e.center.lat;
+    var t=e.tags||{},
+        lon=e.lon!=null?e.lon:e.center&&e.center.lon,
+        lat=e.lat!=null?e.lat:e.center&&e.center.lat;
+
     if(!Number.isFinite(lon)||!Number.isFinite(lat))continue;
+
     var category='poi',sub='';
-    if(t.power==='plant'||t.power==='generator'){category='power';sub=t['plant:source']||t['generator:source']||'other'}
-    else if(t.telecom==='data_center'||t.building==='data_center'||t.industrial==='data_centre'){category='datacenter';sub=t.operator||'other'}
-    else if(t.waterway==='dam'||t.waterway==='weir'){category='dam';sub=t.waterway}
-    else if(t.harbour==='yes'||t.amenity==='ferry_terminal'||t.man_made==='pier'){category='network';sub='ports'}
-    else if(t.railway){category='network';sub='railway'}
-    else if(t.power){category='network';sub=t.power}
-    else if(t.man_made==='communication_line'){category='network';sub='cables'}
-    else if(t.man_made==='mine'||t.man_made==='mineshaft'||t.landuse==='quarry'){category='resource';sub=t.resource||t.landuse||'mining'}
-    else if(t.office==='company'&&t.headquarters==='yes'){category='hq';sub=t.office}
-    else if(t.office==='government'||t.government){category='government';sub=t.government||'government'}
-    else if(t.amenity==='hospital'){category='poi';sub='hospital'}
-    else if(t.office==='diplomatic'||t.amenity==='embassy'){category='poi';sub='embassy'}
-    else if(t.military){category='poi';sub='military'}
-    out.push({type:'Feature',geometry:{type:'Point',coordinates:[lon,lat]},properties:{category:category,subtype:sub,source:'OpenStreetMap',osm_id:e.id,name:t.name||t.ref||category,operator:t.operator||'',owner:t.owner||'',plant_source:t['plant:source']||t['generator:source']||'',capacity:t['plant:output:electricity']||t['generator:output:electricity']||'',network:t.network||''}});
+
+    if(t.power==='plant'||t.power==='generator'){
+      category='power';
+      sub=t['plant:source']||t['generator:source']||'other'
+    }
+    else if(t.telecom==='data_center'||t.building==='data_center'||t.industrial==='data_centre'){
+      category='datacenter';
+      sub=t.operator||'other'
+    }
+    else if(t.waterway==='dam'||t.waterway==='weir'){
+      category='dam';
+      sub=t.waterway
+    }
+    else if(t.harbour==='yes'||t.amenity==='ferry_terminal'||t.man_made==='pier'){
+      category='network';
+      sub='ports'
+    }
+    else if(t.railway){
+      category='network';
+      sub='railway'
+    }
+    else if(t.power){
+      category='network';
+      sub=t.power
+    }
+    else if(t.man_made==='communication_line'){
+      category='network';
+      sub='cables'
+    }
+    else if(t.man_made==='mine'||t.man_made==='mineshaft'||t.landuse==='quarry'){
+      category='resource';
+      sub=t.resource||t.landuse||'mining'
+    }
+    else if(t.office==='company'&&t.headquarters==='yes'){
+      category='hq';
+      sub=t.office
+    }
+    else if(t.office==='government'||t.government){
+      category='government';
+      sub=t.government||'government'
+    }
+    else if(t.amenity==='hospital'){
+      category='poi';
+      sub='hospital'
+    }
+    else if(t.office==='diplomatic'||t.amenity==='embassy'){
+      category='poi';
+      sub='embassy'
+    }
+    else if(t.military){
+      category='poi';
+      sub='military'
+    }
+
+    out.push({
+      type:'Feature',
+      geometry:{
+        type:'Point',
+        coordinates:[lon,lat]
+      },
+      properties:{
+        category:category,
+        subtype:sub,
+        source:'OpenStreetMap',
+        osm_id:e.id,
+        name:t.name||t.ref||category,
+        operator:t.operator||'',
+        owner:t.owner||'',
+        plant_source:t['plant:source']||t['generator:source']||'',
+        capacity:t['plant:output:electricity']||t['generator:output:electricity']||'',
+        network:t.network||''
+      }
+    });
   }
+
   return put(k,out);
 }
 
 async function submarineCables(b){
-  const k='submarine-cables:'+b.minLon.toFixed(2)+','+b.minLat.toFixed(2)+','+b.maxLon.toFixed(2)+','+b.maxLat.toFixed(2);
-  const hit=cached(k,600000);if(hit)return hit;
+  const k='submarine-cables:'+
+    b.minLon.toFixed(2)+','+
+    b.minLat.toFixed(2)+','+
+    b.maxLon.toFixed(2)+','+
+    b.maxLat.toFixed(2);
+
+  const hit=cached(k,600000);
+
+  if(hit)return hit;
+
   const q='[out:json][timeout:30];('+
     'way["submarine"="yes"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     'way["seamark:type"="cable_submarine"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     'way["location"="underwater"]["communication"="line"]('+b.minLat+','+b.minLon+','+b.maxLat+','+b.maxLon+');'+
     ');out geom tags;';
-  const r=await fetch(overpassUrl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','User-Agent':'TrackMeNow/1.0'},body:'data='+encodeURIComponent(q)});
+
+  const r=await fetch(
+    overpassUrl,
+    {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded',
+        'User-Agent':'TrackMeNow/1.0'
+      },
+      body:'data='+encodeURIComponent(q)
+    }
+  );
+
   if(!r.ok)throw Error('Overpass submarine cables HTTP '+r.status);
+
   const j=await r.json(),out=[];
+
   for(const e of(j.elements||[])){
-    const g=(e.geometry||[]).map(function(p){return [Number(p.lon),Number(p.lat)]}).filter(function(p){return Number.isFinite(p[0])&&Number.isFinite(p[1])});
+    const g=(e.geometry||[])
+      .map(function(p){
+        return [Number(p.lon),Number(p.lat)]
+      })
+      .filter(function(p){
+        return Number.isFinite(p[0])&&Number.isFinite(p[1])
+      });
+
     if(g.length<2)continue;
+
     const t=e.tags||{};
-    out.push({type:'Feature',geometry:{type:'LineString',coordinates:g},properties:{category:'cable',subtype:'submarine',source:'OpenStreetMap/Overpass',osm_id:e.id,name:t.name||t.ref||'Submarine cable',operator:t.operator||'',ref:t.ref||''}});
+
+    out.push({
+      type:'Feature',
+      geometry:{
+        type:'LineString',
+        coordinates:g
+      },
+      properties:{
+        category:'cable',
+        subtype:'submarine',
+        source:'OpenStreetMap/Overpass',
+        osm_id:e.id,
+        name:t.name||t.ref||'Submarine cable',
+        operator:t.operator||'',
+        ref:t.ref||''
+      }
+    });
   }
+
   return put(k,out);
 }
 
 async function cells(b){
-  if(!cellKey) return {status:'api-key-required',source:'OpenCelliD',features:[]};
-  var u='https://opencellid.org/cell/getInArea?key='+encodeURIComponent(cellKey)+'&BBOX='+encodeURIComponent([b.minLat,b.minLon,b.maxLat,b.maxLon].join(','))+'&format=json&limit=50';
-  var r=await fetch(u,{headers:{'User-Agent':'TrackMeNow/1.0'}});
-  if(!r.ok) throw Error('OpenCelliD HTTP '+r.status);
+  if(!cellKey)
+    return {
+      status:'api-key-required',
+      source:'OpenCelliD',
+      features:[]
+    };
+
+  var u='https://opencellid.org/cell/getInArea?key='+
+    encodeURIComponent(cellKey)+
+    '&BBOX='+
+    encodeURIComponent([
+      b.minLat,
+      b.minLon,
+      b.maxLat,
+      b.maxLon
+    ].join(','))+
+    '&format=json&limit=50';
+
+  var r=await fetch(
+    u,
+    {headers:{'User-Agent':'TrackMeNow/1.0'}}
+  );
+
+  if(!r.ok)throw Error('OpenCelliD HTTP '+r.status);
+
   var j=await r.json();
-  if(j.error||j.stat==='err') throw Error(j.error||j.err||'OpenCelliD error');
-  return {status:'live',source:'OpenCelliD',features:(j.cells||[]).map(function(c){return {type:'Feature',geometry:{type:'Point',coordinates:[Number(c.lon),Number(c.lat)]},properties:{category:'cell',source:'OpenCelliD',mcc:c.mcc,mnc:c.mnc,lac:c.lac,tac:c.tac,cellid:c.cellid,radio:c.radio,range_m:c.range,samples:c.samples,signal:c.averageSignalStrength}}})};
+
+  if(j.error||j.stat==='err')
+    throw Error(j.error||j.err||'OpenCelliD error');
+
+  return {
+    status:'live',
+    source:'OpenCelliD',
+    features:(j.cells||[]).map(function(c){
+      return {
+        type:'Feature',
+        geometry:{
+          type:'Point',
+          coordinates:[
+            Number(c.lon),
+            Number(c.lat)
+          ]
+        },
+        properties:{
+          category:'cell',
+          source:'OpenCelliD',
+          mcc:c.mcc,
+          mnc:c.mnc,
+          lac:c.lac,
+          tac:c.tac,
+          cellid:c.cellid,
+          radio:c.radio,
+          range_m:c.range,
+          samples:c.samples,
+          signal:c.averageSignalStrength
+        }
+      }
+    })
+  };
 }
 
 async function liveEvents(){
   const out=[],sources=[];
+
   try{
-    const r=await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson',{headers:{'User-Agent':'TrackMeNow/1.0'}});
+    const r=await fetch(
+      'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson',
+      {headers:{'User-Agent':'TrackMeNow/1.0'}}
+    );
+
     if(!r.ok)throw Error('USGS HTTP '+r.status);
+
     const j=await r.json();
+
     for(const f of (j.features||[])){
       const c=f.geometry&&f.geometry.coordinates||[];
-      if(!Number.isFinite(Number(c[0]))||!Number.isFinite(Number(c[1])))continue;
+
+      if(
+        !Number.isFinite(Number(c[0]))||
+        !Number.isFinite(Number(c[1]))
+      )continue;
+
       const p=f.properties||{};
-      out.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(c[0]),Number(c[1])]},properties:{category:'event',eventType:'quake',source:'USGS Earthquake Hazards Program',status:'LIVE FEED',name:p.place||'Earthquake',magnitude:p.mag,time:p.time,url:p.url,ts:p.time}});
+
+      out.push({
+        type:'Feature',
+        geometry:{
+          type:'Point',
+          coordinates:[
+            Number(c[0]),
+            Number(c[1])
+          ]
+        },
+        properties:{
+          category:'event',
+          eventType:'quake',
+          source:'USGS Earthquake Hazards Program',
+          status:'LIVE FEED',
+          name:p.place||'Earthquake',
+          magnitude:p.mag,
+          time:p.time,
+          url:p.url,
+          ts:p.time
+        }
+      });
     }
-    sources.push({type:'quake',source:'USGS',status:'live',count:out.length});
-  }catch(e){sources.push({type:'quake',source:'USGS',status:'error',error:e.message})}
-  return {features:out,sources};
-}
-router.get('/events',async function(req,res){try{res.json(await liveEvents())}catch(e){res.status(502).json({error:e.message})}});
-router.get('/health',function(req,res){res.json({ok:true,service:'trackmenow-global',sources:{flights:'OpenSky ADS-B',ships:aisUrl?'configured':'feed-required',transport:gtfsUrls.length?'configured':'feed-required',osm:'available',cells:cellKey?'configured':'api-key-required'}})});
-router.get('/movement',async function(req,res){
-  var b=bbox(req.query.bbox);if(!b)return res.status(400).json({error:'invalid bbox'});
-  var layers=String(req.query.layers||'flights,ships,public-transport,traffic,cameras,cells,infrastructure').split(',').map(function(x){return x.trim()});
-  var zoom=Math.max(0,Math.min(22,Number(req.query.zoom||0)));
-  var features=[],sources=[];
-  async function run(layer,fn,meta){
-    try{var v=await Promise.race([fn(),new Promise(function(_,rej){setTimeout(function(){rej(Error('source timeout'))},9000)})]);if(Array.isArray(v))features.push.apply(features,v);else if(v&&Array.isArray(v.features))features.push.apply(features,v.features);sources.push(Object.assign({},meta,{status:'live',count:Array.isArray(v)?v.length:(v&&v.features?v.features.length:0)}))}
-    catch(e){sources.push(Object.assign({},meta,{status:'error',error:e.message}))}
+
+    sources.push({
+      type:'quake',
+      source:'USGS',
+      status:'live',
+      count:out.length
+    });
+
+  }catch(e){
+    sources.push({
+      type:'quake',
+      source:'USGS',
+      status:'error',
+      error:e.message
+    });
   }
-  var tasks=[];
-  if(layers.includes('flights')||layers.includes('flight'))tasks.push(run('flights',function(){return flights(b)},{layer:'flights',source:'OpenSky ADS-B'}));
-  if(layers.includes('ships')||layers.includes('ship')||layers.includes('ais'))tasks.push(run('ships',function(){return ships(b)},{layer:'ships',source:'AIS Maritime Network',configured:!!aisUrl||!!aisStreamKey}));
-  if(layers.includes('public-transport')||layers.includes('transit')||layers.includes('gtfs'))tasks.push(run('public-transport',async function(){var t=await transit(b),tx=[];try{tx=await taxis(b)}catch(e){}return {features:t.concat(tx),_count:t.length+tx.length,_status:'live'}},{layer:'public-transport',source:'GTFS-Realtime'+(taxiUrl?' + taxi feed':'')}));
-  if(layers.includes('traffic')||layers.includes('road'))tasks.push(run('traffic',function(){return traffic(b)},{layer:'traffic',source:'DOT Traffic Feeds'}));
-  // Expensive global OSM/Overpass queries are deliberately zoom-gated so a world view cannot block every live feed.
-  if((layers.includes('cameras')||layers.includes('infrastructure'))&&zoom>=4)tasks.push(run('public-assets',async function(){var a=await osmAssets(b);return layers.includes('cameras')&&!layers.includes('infrastructure')?a.filter(function(x){return x.properties.category==='camera'}):a},{layer:'public-assets',source:'OpenStreetMap/Overpass'}));
-  else if(layers.includes('cameras')||layers.includes('infrastructure'))sources.push({layer:'public-assets',status:'zoom-in-required',source:'OpenStreetMap/Overpass',count:0});
-  if(layers.includes('intelligence')&&zoom>=4)tasks.push(run('intelligence',async function(){var ia=await intelligenceAssets(b),cables=[];try{cables=await submarineCables(b)}catch(e){}return ia.concat(cables)},{layer:'intelligence',source:'OpenStreetMap/Overpass · ODbL'}));
-  else if(layers.includes('intelligence'))sources.push({layer:'intelligence',status:'zoom-in-required',source:'OpenStreetMap/Overpass · ODbL',count:0});
-  if(layers.includes('cells')&&zoom>=7)tasks.push(run('cells',async function(){var x=await cells(b);return x.features},{layer:'cells',source:'OpenCelliD'}));
-  else if(layers.includes('cells'))sources.push({layer:'cells',status:'zoom-in-required',source:'OpenCelliD',count:0});
-  await Promise.all(tasks);
-  res.json({type:'FeatureCollection',features:features,sources:sources,generatedAt:new Date().toISOString()});
+
+  return {
+    features:out,
+    sources
+  };
+}
+
+router.get('/events',async function(req,res){
+  try{
+    res.json(await liveEvents())
+  }catch(e){
+    res.status(502).json({error:e.message})
+  }
 });
+
+router.get('/health',function(req,res){
+  res.json({
+    ok:true,
+    service:'trackmenow-global',
+    sources:{
+      flights:'OpenSky ADS-B',
+      ships:aisUrl?'configured':'feed-required',
+      transport:gtfsUrls.length?'configured':'feed-required',
+      osm:'available',
+      cells:cellKey?'configured':'api-key-required'
+    }
+  })
+});
+
+router.get('/movement',async function(req,res){
+  var b=bbox(req.query.bbox);
+
+  if(!b)
+    return res.status(400).json({error:'invalid bbox'});
+
+  var layers=String(
+    req.query.layers||
+    'flights,ships,public-transport,traffic,cameras,cells,infrastructure'
+  )
+    .split(',')
+    .map(function(x){return x.trim()});
+
+  var zoom=Math.max(
+    0,
+    Math.min(22,Number(req.query.zoom||0))
+  );
+
+  var features=[],sources=[];
+
+  async function run(layer,fn,meta){
+    try{
+      var v=await Promise.race([
+        fn(),
+        new Promise(function(_,rej){
+          setTimeout(
+            function(){
+              rej(Error('source timeout'))
+            },
+            9000
+          )
+        })
+      ]);
+
+      if(Array.isArray(v))
+        features.push.apply(features,v);
+      else if(v&&Array.isArray(v.features))
+        features.push.apply(features,v.features);
+
+      sources.push(
+        Object.assign(
+          {},
+          meta,
+          {
+            status:'live',
+            count:Array.isArray(v)
+              ?v.length
+              :(v&&v.features?v.features.length:0)
+          }
+        )
+      );
+
+    }catch(e){
+      sources.push(
+        Object.assign(
+          {},
+          meta,
+          {
+            status:'error',
+            error:e.message
+          }
+        )
+      )
+    }
+  }
+
+  var tasks=[];
+
+  if(
+    layers.includes('flights')||
+    layers.includes('flight')
+  )
+    tasks.push(
+      run(
+        'flights',
+        function(){return flights(b)},
+        {
+          layer:'flights',
+          source:'OpenSky ADS-B'
+        }
+      )
+    );
+
+  if(
+    layers.includes('ships')||
+    layers.includes('ship')||
+    layers.includes('ais')
+  )
+    tasks.push(
+      run(
+        'ships',
+        function(){return ships(b)},
+        {
+          layer:'ships',
+          source:'AIS Maritime Network',
+          configured:!!aisUrl||!!aisStreamKey
+        }
+      )
+    );
+
+  if(
+    layers.includes('public-transport')||
+    layers.includes('transit')||
+    layers.includes('gtfs')
+  )
+    tasks.push(
+      run(
+        'public-transport',
+        async function(){
+          var t=await transit(b),tx=[];
+
+          try{
+            tx=await taxis(b)
+          }catch(e){}
+
+          return {
+            features:t.concat(tx),
+            _count:t.length+tx.length,
+            _status:'live'
+          }
+        },
+        {
+          layer:'public-transport',
+          source:'GTFS-Realtime'+
+            (taxiUrl?' + taxi feed':'')
+        }
+      )
+    );
+
+  if(
+    layers.includes('traffic')||
+    layers.includes('road')
+  )
+    tasks.push(
+      run(
+        'traffic',
+        function(){return traffic(b)},
+        {
+          layer:'traffic',
+          source:'DOT Traffic Feeds'
+        }
+      )
+    );
+
+  if(
+    (layers.includes('cameras')||
+    layers.includes('infrastructure'))&&
+    zoom>=4
+  )
+    tasks.push(
+      run(
+        'public-assets',
+        async function(){
+          var a=await osmAssets(b);
+
+          return layers.includes('cameras')&&
+            !layers.includes('infrastructure')
+            ?a.filter(function(x){
+              return x.properties.category==='camera'
+            })
+            :a
+        },
+        {
+          layer:'public-assets',
+          source:'OpenStreetMap/Overpass'
+        }
+      )
+    );
+  else if(
+    layers.includes('cameras')||
+    layers.includes('infrastructure')
+  )
+    sources.push({
+      layer:'public-assets',
+      status:'zoom-in-required',
+      source:'OpenStreetMap/Overpass',
+      count:0
+    });
+
+  if(
+    layers.includes('intelligence')&&
+    zoom>=4
+  )
+    tasks.push(
+      run(
+        'intelligence',
+        async function(){
+          var ia=await intelligenceAssets(b),cables=[];
+
+          try{
+            cables=await submarineCables(b)
+          }catch(e){}
+
+          return ia.concat(cables)
+        },
+        {
+          layer:'intelligence',
+          source:'OpenStreetMap/Overpass · ODbL'
+        }
+      )
+    );
+  else if(layers.includes('intelligence'))
+    sources.push({
+      layer:'intelligence',
+      status:'zoom-in-required',
+      source:'OpenStreetMap/Overpass · ODbL',
+      count:0
+    });
+
+  if(
+    layers.includes('cells')&&
+    zoom>=7
+  )
+    tasks.push(
+      run(
+        'cells',
+        async function(){
+          var x=await cells(b);
+          return x.features
+        },
+        {
+          layer:'cells',
+          source:'OpenCelliD'
+        }
+      )
+    );
+  else if(layers.includes('cells'))
+    sources.push({
+      layer:'cells',
+      status:'zoom-in-required',
+      source:'OpenCelliD',
+      count:0
+    });
+
+  await Promise.all(tasks);
+
+  res.json({
+    type:'FeatureCollection',
+    features:features,
+    sources:sources,
+    generatedAt:new Date().toISOString()
+  });
+});
+
 router.get('/search',async function(req,res){
   const q=String(req.query.q||'').trim();
-  if(!q)return res.status(400).json({error:'q is required'});
+
+  if(!q)
+    return res.status(400).json({error:'q is required'});
+
   const out=[];
-  const coord=q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if(coord) out.push({type:'coordinate',lat:Number(coord[1]),lon:Number(coord[2]),label:q});
+
+  const coord=q.match(
+    /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/
+  );
+
+  if(coord)
+    out.push({
+      type:'coordinate',
+      lat:Number(coord[1]),
+      lon:Number(coord[2]),
+      label:q
+    });
+
   try{
-    const nr=await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q='+encodeURIComponent(q),{headers:{'User-Agent':'TrackMeNow/1.0'}});
-    if(nr.ok){const places=await nr.json();for(const p of places)out.push({type:'place',lat:Number(p.lat),lon:Number(p.lon),label:p.display_name,osm_type:p.osm_type,osm_id:p.osm_id});}
+    const nr=await fetch(
+      'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q='+
+      encodeURIComponent(q),
+      {
+        headers:{
+          'User-Agent':'TrackMeNow/1.0'
+        }
+      }
+    );
+
+    if(nr.ok){
+      const places=await nr.json();
+
+      for(const p of places)
+        out.push({
+          type:'place',
+          lat:Number(p.lat),
+          lon:Number(p.lon),
+          label:p.display_name,
+          osm_type:p.osm_type,
+          osm_id:p.osm_id
+        });
+    }
   }catch(e){}
+
   const safeQ=encodeURIComponent(q.toUpperCase());
+
   const aircraftUrls=[
     'https://api.adsb.lol/v2/callsign/'+safeQ,
     'https://api.adsb.lol/v2/icao/'+safeQ,
     'https://api.adsb.lol/v2/reg/'+safeQ
   ];
-  for(const u of aircraftUrls){try{
-    const r=await fetch(u,{headers:{'User-Agent':'TrackMeNow/1.0'}});if(!r.ok)continue;
-    const j=await r.json();fo
-      r(const a of (j.ac||[])){
-      if(Number.isFinite(Number(a.lat))&&Number.isFinite(Number(a.lon)))out.push({type:'aircraft',lat:Number(a.lat),lon:Number(a.lon),label:(a.flight||a.hex||q).trim(),icao24:a.hex,callsign:(a.flight||'').trim(),registration:a.r,altitude_m:a.alt_baro,speed_mps:Number.isFinite(Number(a.gs))?Number(a.gs)*0.514444:null,heading:a.track,source:'ADSB.lol'});
+
+  for(const u of aircraftUrls){
+    try{
+      const r=await fetch(
+        u,
+        {
+          headers:{
+            'User-Agent':'TrackMeNow/1.0'
+          }
+        }
+      );
+
+      if(!r.ok)continue;
+
+      const j=await r.json();
+
+      for(const a of (j.ac||[])){
+        if(
+          Number.isFinite(Number(a.lat))&&
+          Number.isFinite(Number(a.lon))
+        )
+          out.push({
+            type:'aircraft',
+            lat:Number(a.lat),
+            lon:Number(a.lon),
+            label:(a.flight||a.hex||q).trim(),
+            icao24:a.hex,
+            callsign:(a.flight||'').trim(),
+            registration:a.r,
+            altitude_m:a.alt_baro,
+            speed_mps:Number.isFinite(Number(a.gs))
+              ?Number(a.gs)*0.514444
+              :null,
+            heading:a.track,
+            source:'ADSB.lol'
+          });
+      }
+
+    }catch(e){}
+  }
+
+  const unique=[];
+  const seen=new Set();
+
+  for(const x of out){
+    const k=[
+      x.type,
+      x.lat,
+      x.lon,
+      x.label
+    ].join('|');
+
+    if(!seen.has(k)){
+      seen.add(k);
+      unique.push(x);
     }
-  }catch(e){}}
-  const unique=[];const seen=new Set();for(const x of out){const k=[x.type,x.lat,x.lon,x.label].join('|');if(!seen.has(k)){seen.add(k);unique.push(x)}}
-  res.json({query:q,results:unique.slice(0,20)});
+  }
+
+  res.json({
+    query:q,
+    results:unique.slice(0,20)
+  });
 });
 
-router.get('/cells',async function(req,res){var b=bbox(req.query.bbox);if(!b)return res.status(400).json({error:'invalid bbox'});try{res.json(await cells(b))}catch(e){res.status(502).json({error:e.message})}});
-router.get('/assets',async function(req,res){var b=bbox(req.query.bbox);if(!b)return res.status(400).json({error:'invalid bbox'});try{res.json({source:'OpenStreetMap/Overpass',features:await osmAssets(b)})}catch(e){res.status(502).json({error:e.message})}});
-router.get('/status',function(_,res){res.json({infrastructure:'OpenStreetMap/Overpass',flights:'ADSB.lol-live',ships:aisUrl?'configured':'feed-required',mobilityDatabase:{configured:!!mobilityDatabaseToken,status:mobilityDiscoveryStatus,error:mobilityDiscoveryError,discoveredFeeds:gtfsUrls.length},publicTransport:gtfsUrls.length?'configured':'no-live-feed-configured',publicTransportFeeds:gtfsUrls.map(function(u){var c=gtfsCache.get(u);return {url:u,status:c&&c.status||'not-polled',vehicles:c?c.features.length:0,error:c&&c.error||null,lastPoll:c&&new Date(c.fetchedAt).toISOString()||null}}),publicAssets:'live',publicCells:cellKey?'configured':'api-key-required',aisStream:aisStreamKey?'configured':'api-key-required',taxiFeed:taxiUrl?'configured':'feed-required'})});
+router.get('/cells',async function(req,res){
+  var b=bbox(req.query.bbox);
+
+  if(!b)
+    return res.status(400).json({error:'invalid bbox'});
+
+  try{
+    res.json(await cells(b))
+  }catch(e){
+    res.status(502).json({error:e.message})
+  }
+});
+
+router.get('/assets',async function(req,res){
+  var b=bbox(req.query.bbox);
+
+  if(!b)
+    return res.status(400).json({error:'invalid bbox'});
+
+  try{
+    res.json({
+      source:'OpenStreetMap/Overpass',
+      features:await osmAssets(b)
+    })
+  }catch(e){
+    res.status(502).json({error:e.message})
+  }
+});
+
+router.get('/status',function(_,res){
+  res.json({
+    infrastructure:'OpenStreetMap/Overpass',
+    flights:'ADSB.lol-live',
+    ships:aisUrl?'configured':'feed-required',
+
+    mobilityDatabase:{
+      configured:!!(
+        mobilityDatabaseRefreshToken||
+        mobilityDatabaseApiKey
+      ),
+      status:mobilityDiscoveryStatus,
+      error:mobilityDiscoveryError,
+      discoveredFeeds:gtfsUrls.length
+    },
+
+    publicTransport:
+      gtfsUrls.length
+        ?'configured'
+        :'no-live-feed-configured',
+
+    publicTransportFeeds:
+      gtfsUrls.map(function(u){
+        var c=gtfsCache.get(u);
+
+        return {
+          url:u,
+          status:c&&c.status||'not-polled',
+          vehicles:c?c.features.length:0,
+          error:c&&c.error||null,
+          lastPoll:c&&new Date(c.fetchedAt).toISOString()||null
+        }
+      }),
+
+    publicAssets:'live',
+    publicCells:cellKey?'configured':'api-key-required',
+    aisStream:aisStreamKey?'configured':'api-key-required',
+    taxiFeed:taxiUrl?'configured':'feed-required'
+  })
+});
 
 export default router;
+```
