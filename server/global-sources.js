@@ -10,6 +10,13 @@ const aisStreamKey = process.env.AISSTREAM_API_KEY || '';
 const taxiUrl = process.env.TAXI_GEOJSON_URL || '';
 const overpassUrl = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
 const cellKey = process.env.OPENCELLID_API_KEY || '';
+const mobilityDatabaseToken = process.env.MOBILITY_DATABASE_API_KEY || '';
+const mobilityDatabaseUrl =
+  process.env.MOBILITY_DATABASE_API_URL ||
+  'https://api.mobilitydatabase.org/v1/gtfs_rt_feeds';
+let mobilityDiscoveryAttempted = false;
+let mobilityDiscoveryStatus = 'not-configured';
+let mobilityDiscoveryError = null;
 const flightGlobalCache={at:0,features:null,promise:null};
 const shipStream={socket:null,bboxKey:'',connected:false,retryMs:1000,positions:new Map(),lastAt:0};
 
@@ -157,6 +164,94 @@ function transitMode(v){
   if(/ferry|boat|water/.test(x)) return 'ferry';
   return 'bus';
 }
+async function discoverMobilityDatabase(){
+  if(mobilityDiscoveryAttempted)return;
+
+  mobilityDiscoveryAttempted=true;
+
+  if(!mobilityDatabaseToken){
+    mobilityDiscoveryStatus='api-key-required';
+    return;
+  }
+
+  try{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),10000);
+
+    const r=await fetch(
+      mobilityDatabaseUrl+'?limit=500',
+      {
+        method:'GET',
+        headers:{
+          'Accept':'application/json',
+          'Authorization':'Bearer '+mobilityDatabaseToken,
+          'User-Agent':'Universe/1.0'
+        },
+        signal:controller.signal
+      }
+    );
+
+    clearTimeout(timeout);
+
+    if(!r.ok){
+      mobilityDiscoveryStatus='error';
+      mobilityDiscoveryError='Mobility Database HTTP '+r.status;
+      return;
+    }
+
+    const body=await r.json();
+
+    const feeds=Array.isArray(body)
+      ? body
+      : Array.isArray(body.data)
+        ? body.data
+        : Array.isArray(body.feeds)
+          ? body.feeds
+          : [];
+
+    let added=0;
+
+    for(const feed of feeds){
+      const urls=feed&&feed.urls||{};
+
+      const realtimeUrl=
+        feed&&feed.direct_download_url||
+        urls.direct_download_url||
+        feed&&feed.url||
+        feed&&feed.download_url;
+
+      if(
+        typeof realtimeUrl==='string' &&
+        /^https?:\/\//i.test(realtimeUrl) &&
+        !gtfsUrls.includes(realtimeUrl)
+      ){
+        gtfsUrls.push(realtimeUrl);
+        added++;
+      }
+
+      /*
+       * Prevent the server from polling the entire
+       * Mobility Database catalog.
+       */
+      if(gtfsUrls.length>=50)break;
+    }
+
+    mobilityDiscoveryStatus='live';
+    mobilityDiscoveryError=null;
+
+    console.log(
+      '[Universe] Mobility Database discovered '+
+      added+
+      ' GTFS-RT feeds; '+
+      gtfsUrls.length+
+      ' total realtime feeds configured.'
+    );
+
+  }catch(e){
+    mobilityDiscoveryStatus='error';
+    mobilityDiscoveryError=e&&e.message||String(e);
+  }
+}
 async function discoverTransitous(){
   if(discoveredGtfs)return;
   discoveredGtfs=true;
@@ -175,7 +270,10 @@ async function discoverTransitous(){
   }));
 }
 async function transit(b){
-  discoverTransitous().catch(()=>{});
+  Promise.allSettled([
+    discoverMobilityDatabase(),
+    discoverTransitous()
+  ]).catch(()=>{});
   var out=[],nowMs=Date.now();
   for(var i=0;i<Math.min(gtfsUrls.length,3);i++){
     var u=gtfsUrls[i],c=gtfsCache.get(u);
@@ -551,7 +649,8 @@ router.get('/search',async function(req,res){
   ];
   for(const u of aircraftUrls){try{
     const r=await fetch(u,{headers:{'User-Agent':'TrackMeNow/1.0'}});if(!r.ok)continue;
-    const j=await r.json();for(const a of (j.ac||[])){
+    const j=await r.json();fo
+      r(const a of (j.ac||[])){
       if(Number.isFinite(Number(a.lat))&&Number.isFinite(Number(a.lon)))out.push({type:'aircraft',lat:Number(a.lat),lon:Number(a.lon),label:(a.flight||a.hex||q).trim(),icao24:a.hex,callsign:(a.flight||'').trim(),registration:a.r,altitude_m:a.alt_baro,speed_mps:Number.isFinite(Number(a.gs))?Number(a.gs)*0.514444:null,heading:a.track,source:'ADSB.lol'});
     }
   }catch(e){}}
@@ -561,6 +660,6 @@ router.get('/search',async function(req,res){
 
 router.get('/cells',async function(req,res){var b=bbox(req.query.bbox);if(!b)return res.status(400).json({error:'invalid bbox'});try{res.json(await cells(b))}catch(e){res.status(502).json({error:e.message})}});
 router.get('/assets',async function(req,res){var b=bbox(req.query.bbox);if(!b)return res.status(400).json({error:'invalid bbox'});try{res.json({source:'OpenStreetMap/Overpass',features:await osmAssets(b)})}catch(e){res.status(502).json({error:e.message})}});
-router.get('/status',function(_,res){res.json({infrastructure:'OpenStreetMap/Overpass',flights:'ADSB.lol-live',ships:aisUrl?'configured':'feed-required',publicTransport:gtfsUrls.length?'configured':'no-live-feed-configured',publicTransportFeeds:gtfsUrls.map(function(u){var c=gtfsCache.get(u);return {url:u,status:c&&c.status||'not-polled',vehicles:c?c.features.length:0,error:c&&c.error||null,lastPoll:c&&new Date(c.fetchedAt).toISOString()||null}}),publicAssets:'live',publicCells:cellKey?'configured':'api-key-required',aisStream:aisStreamKey?'configured':'api-key-required',taxiFeed:taxiUrl?'configured':'feed-required'})});
+router.get('/status',function(_,res){res.json({infrastructure:'OpenStreetMap/Overpass',flights:'ADSB.lol-live',ships:aisUrl?'configured':'feed-required',mobilityDatabase:{configured:!!mobilityDatabaseToken,status:mobilityDiscoveryStatus,error:mobilityDiscoveryError,discoveredFeeds:gtfsUrls.length},publicTransport:gtfsUrls.length?'configured':'no-live-feed-configured',publicTransportFeeds:gtfsUrls.map(function(u){var c=gtfsCache.get(u);return {url:u,status:c&&c.status||'not-polled',vehicles:c?c.features.length:0,error:c&&c.error||null,lastPoll:c&&new Date(c.fetchedAt).toISOString()||null}}),publicAssets:'live',publicCells:cellKey?'configured':'api-key-required',aisStream:aisStreamKey?'configured':'api-key-required',taxiFeed:taxiUrl?'configured':'feed-required'})});
 
 export default router;
