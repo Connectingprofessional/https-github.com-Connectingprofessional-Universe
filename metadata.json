@@ -1,0 +1,7 @@
+{
+  "name": "TrackMeNow — Global Intelligence",
+  "description": "Global live intelligence tracker for flights, maritime vessels, transit, weather, and real-time sensor data.",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
