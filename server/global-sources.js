@@ -112,8 +112,8 @@ async function flights(b){
           const cs = (s[1]||'').trim() || (s[0] ? 'FLT' + s[0].slice(-3) : 'FLT100');
           const code = cs.slice(0, 2).toUpperCase();
           const al = AIRLINE_MAP[code] || { name: (s[2] || 'Commercial') + ' Airlines', iata: code || 'GL' };
-          const acType = AC_TYPES[idx % AC_TYPES.length];
-          const pair = CITY_PAIRS[idx % CITY_PAIRS.length];
+          const acType = null;
+          const pair = { orig: null, dest: null };
           const altM = Number.isFinite(Number(s[7])) ? Number(s[7]) : 10200;
           const spdMps = Number.isFinite(Number(s[9])) ? Number(s[9]) : 240;
           const vRate = Number.isFinite(Number(s[11])) ? Number(s[11]) : 0;
@@ -133,14 +133,15 @@ async function flights(b){
               category:'flight',
               source:'OpenSky ADS-B Live',
               status:Number(s[4])&&now-Number(s[4])<45?'LIVE':'RECENT',
-              airline: al.name,
+              airline: null,
+              airline_code: code || null,
               flight_number: cs,
               callsign: cs,
               aircraft_type: acType,
-              registration: 'N' + (10000 + (idx * 37) % 89999),
+              registration: null,
               origin: pair.orig,
               destination: pair.dest,
-              route: `${pair.orig} → ${pair.dest}`,
+              route: null,
               current_location: `${Number(s[6]).toFixed(3)}°N, ${Number(s[5]).toFixed(3)}°E`,
               altitude_m: altM,
               altitude_ft: Math.round(altM * 3.28084),
@@ -148,7 +149,7 @@ async function flights(b){
               speed_kts: Math.round(spdMps * 1.94384),
               heading: Number.isFinite(Number(s[10])) ? Number(s[10]) : 0,
               flight_status: flightStatus,
-              estimated_arrival: 'T+' + (45 + (idx * 15) % 180) + ' min',
+              estimated_arrival: null,
               last_contact: s[4] || now,
               last_update: '3s ago'
             }
