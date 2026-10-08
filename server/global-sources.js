@@ -1,4 +1,3 @@
-```javascript
 import express from 'express';
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import WebSocket from 'ws';
@@ -109,8 +108,8 @@ async function flights(b){
       features=(j.states||[])
         .filter(s=>Number.isFinite(Number(s[5]))&&Number.isFinite(Number(s[6])))
         .map((s, idx)=>{
-          const cs = (s[1]||'').trim() || (s[0] ? 'FLT' + s[0].slice(-3) : 'FLT100');
-          const code = cs.slice(0, 2).toUpperCase();
+          const cs = (s[1]||'').trim() || null;
+          const code = cs ? cs.slice(0, 2).toUpperCase() : null;
           const al = AIRLINE_MAP[code] || null;
           const acType = null;
           const pair = { orig: null, dest: null };
@@ -134,7 +133,7 @@ async function flights(b){
               source:'OpenSky ADS-B Live',
               status:Number(s[4])&&now-Number(s[4])<45?'LIVE':'RECENT',
               airline: null,
-              airline_code: al ? al.iata : (code || null),
+              airline_code: al ? al.iata : null,
               flight_number: cs,
               callsign: cs,
               aircraft_type: acType,
@@ -142,7 +141,7 @@ async function flights(b){
               origin: pair.orig,
               destination: pair.dest,
               route: null,
-              current_location: `${Number(s[6]).toFixed(3)}°N, ${Number(s[5]).toFixed(3)}°E`,
+              current_location: Number(s[6]).toFixed(3) + '°N, ' + Number(s[5]).toFixed(3) + '°E',
               altitude_m: altM,
               altitude_ft: altM == null ? null : Math.round(altM * 3.28084),
               speed_mps: spdMps,
@@ -150,8 +149,8 @@ async function flights(b){
               heading: Number.isFinite(Number(s[10])) ? Number(s[10]) : null,
               flight_status: flightStatus,
               estimated_arrival: null,
-              last_contact: s[4] || now,
-              last_update: '3s ago'
+              last_contact: Number.isFinite(Number(s[4])) ? Number(s[4]) : null,
+              last_update: Number.isFinite(Number(s[4])) ? Math.max(0, Math.round(now - Number(s[4]))) + 's ago' : null
             }
           };
         });
@@ -418,9 +417,9 @@ async function transit(b){
             route_id:v.trip&&v.trip.routeId||'',
             headsign:v.trip&&v.trip.tripHeadsign||'',
             speed_mps:p.speed,
-            speed_kmh:Number.isFinite(p.speed)?Number((p.speed*3.6).toFixed(0)):28,
+            speed_kmh:Number.isFinite(p.speed)?Number((p.speed*3.6).toFixed(0)):null,
             bearing:p.bearing,
-            timestamp:ts||now
+            timestamp:ts||null
           }
         });
       }
@@ -488,7 +487,7 @@ async function ships(b){
           source:'AIS Stream',
           status:now-p.seenAt<90000?'LIVE':'RECENT',
           mmsi:p.mmsi,
-          name:p.name||'VESSEL-'+p.mmsi.slice(-4),
+          name:p.name||null,
           ship_type:'Cargo / Commercial',
           speed_mps:Number.isFinite(p.sog)?Number((p.sog*0.514444).toFixed(1)):null,
           speed_knots:Number.isFinite(p.sog)?Number(p.sog.toFixed(1)):null,
