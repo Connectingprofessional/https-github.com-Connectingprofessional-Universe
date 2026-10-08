@@ -111,12 +111,12 @@ async function flights(b){
         .map((s, idx)=>{
           const cs = (s[1]||'').trim() || (s[0] ? 'FLT' + s[0].slice(-3) : 'FLT100');
           const code = cs.slice(0, 2).toUpperCase();
-          const al = AIRLINE_MAP[code] || { name: (s[2] || 'Commercial') + ' Airlines', iata: code || 'GL' };
+          const al = AIRLINE_MAP[code] || null;
           const acType = null;
           const pair = { orig: null, dest: null };
-          const altM = Number.isFinite(Number(s[7])) ? Number(s[7]) : 10200;
-          const spdMps = Number.isFinite(Number(s[9])) ? Number(s[9]) : 240;
-          const vRate = Number.isFinite(Number(s[11])) ? Number(s[11]) : 0;
+          const altM = Number.isFinite(Number(s[7])) ? Number(s[7]) : null;
+          const spdMps = Number.isFinite(Number(s[9])) ? Number(s[9]) : null;
+          const vRate = Number.isFinite(Number(s[11])) ? Number(s[11]) : null;
 
           let flightStatus = 'EN ROUTE (CRUISING)';
           if (s[8]) flightStatus = 'TAXIING / ON GROUND';
@@ -134,7 +134,7 @@ async function flights(b){
               source:'OpenSky ADS-B Live',
               status:Number(s[4])&&now-Number(s[4])<45?'LIVE':'RECENT',
               airline: null,
-              airline_code: code || null,
+              airline_code: al ? al.iata : (code || null),
               flight_number: cs,
               callsign: cs,
               aircraft_type: acType,
@@ -144,10 +144,10 @@ async function flights(b){
               route: null,
               current_location: `${Number(s[6]).toFixed(3)}°N, ${Number(s[5]).toFixed(3)}°E`,
               altitude_m: altM,
-              altitude_ft: Math.round(altM * 3.28084),
+              altitude_ft: altM == null ? null : Math.round(altM * 3.28084),
               speed_mps: spdMps,
-              speed_kts: Math.round(spdMps * 1.94384),
-              heading: Number.isFinite(Number(s[10])) ? Number(s[10]) : 0,
+              speed_kts: spdMps == null ? null : Math.round(spdMps * 1.94384),
+              heading: Number.isFinite(Number(s[10])) ? Number(s[10]) : null,
               flight_status: flightStatus,
               estimated_arrival: null,
               last_contact: s[4] || now,
