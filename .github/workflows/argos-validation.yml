@@ -1,0 +1,25 @@
+name: Validate Argos replica branch
+
+on:
+  push:
+    branches:
+      - argos-replica-real-data-2026-10-08
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check JavaScript syntax
+        run: |
+          node --check server/global-sources.js
+          node --check server/index.js
+          node --check js/trackmenow-real-data.js
+          node --check js/trackmenow-config.js
+          node --check trackmenow.js
+          node --check trackmenow-layers.js
+          node --check trackmenow-aura.js
