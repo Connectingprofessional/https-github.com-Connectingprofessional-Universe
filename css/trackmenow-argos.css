@@ -1,0 +1,20 @@
+:root{
+  --ax-cy:#0bd3d3;--ax-bg:#05080c;--ax-panel:rgba(10,17,24,.76);
+  --ax-ink:#dfeef2;--ax-strong:#eafeff;--ax-txt:#c2d6db;--ax-mut:#8aa3ab;
+  --ax-dim:#5f7a82;--ax-line:rgba(11,211,211,.13);--ax-gold:#ffd23b;--ax-grn:#22e07a;
+  --ax-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+body{font-family:var(--ax-mono),ui-monospace,monospace!important;background:var(--ax-bg)!important}
+.tm-argos-hud{position:fixed;z-index:1500;top:12px;left:14px;display:flex;align-items:center;gap:8px;pointer-events:none}
+.tm-argos-hud>*{pointer-events:auto}
+.tm-argos-brand{height:36px;display:flex;align-items:center;padding:0 12px;border:1px solid var(--ax-line);background:rgba(5,8,12,.78);backdrop-filter:blur(12px);color:var(--ax-strong);font-size:12px;font-weight:800;letter-spacing:1.8px}
+.tm-argos-brand b{color:var(--ax-cy)}
+.tm-argos-status{position:fixed;z-index:1490;right:14px;top:12px;height:36px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--ax-line);background:rgba(5,8,12,.78);backdrop-filter:blur(12px);font:10px var(--ax-mono);color:var(--ax-mut)}
+.tm-argos-dot{width:7px;height:7px;border-radius:50%;background:var(--ax-dim)}
+.tm-argos-dot.live{background:var(--ax-grn);box-shadow:0 0 9px rgba(34,224,122,.7)}
+.tm-argos-dot.error{background:#ff6b6b}
+.tm-argos-rail{position:fixed;z-index:1490;left:14px;top:58px;bottom:66px;width:42px;display:flex;flex-direction:column;gap:5px;padding:6px 0;background:rgba(5,8,12,.62);border:1px solid var(--ax-line);backdrop-filter:blur(12px)}
+.tm-argos-rail button{border:0;background:transparent;color:var(--ax-mut);height:34px;cursor:pointer;font:11px var(--ax-mono)}
+.tm-argos-rail button:hover,.tm-argos-rail button.active{color:var(--ax-cy);background:rgba(11,211,211,.08)}
+.tm-argos-source{position:fixed;z-index:1480;left:66px;bottom:64px;max-width:440px;padding:6px 9px;border:1px solid var(--ax-line);background:rgba(5,8,12,.78);backdrop-filter:blur(10px);font:9px var(--ax-mono);color:var(--ax-dim)}
+@media(max-width:700px){.tm-argos-rail{left:8px}.tm-argos-source{left:58px;right:8px;max-width:none}.tm-argos-status{right:8px}.tm-argos-hud{left:8px}}
